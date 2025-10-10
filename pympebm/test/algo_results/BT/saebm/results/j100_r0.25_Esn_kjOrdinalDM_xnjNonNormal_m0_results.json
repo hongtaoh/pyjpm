@@ -1,0 +1,20 @@
+{
+    "runtime": 1.687757968902588,
+    "max_log_likelihood": -201.68645034874507,
+    "kendalls_tau": 0.24242424242424243,
+    "mean_absolute_error": 1.0,
+    "order_with_highest_ll": {
+        "ABETA": 3,
+        "ADAS13": 12,
+        "EntorhinalNorm": 2,
+        "FDG": 5,
+        "HippocampusNorm": 7,
+        "LDELTOTAL": 4,
+        "MMSE": 1,
+        "MOCA": 9,
+        "MidTempNorm": 6,
+        "PTAU": 11,
+        "VentricleNorm": 8,
+        "WholeBrainNorm": 10
+    }
+}

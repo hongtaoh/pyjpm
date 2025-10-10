@@ -51,37 +51,37 @@ def very_irregular_distribution(
     segment_1, segment_2, segment_3 = np.array_split(np.arange(size), 3)
 
     # --- Highly non-normal design per biomarker ---
-    if biomarker in ["MMSE", "ADAS"]:
+    if biomarker in ["MMSE", "ADAS13", "RAVLT_immediate", "CDRSB", "FAQ", "LDELTOTAL", "MOCA", "TRABSCOR"]:
         # Cognitive tests: Triangular + Normal + Exponential mixture
         base[segment_1] = rng.triangular(mean - 2*std, mean - 1.5*std, mean, size=len(segment_1))
         base[segment_2] = rng.normal(mean + std, 0.3 * std, size=len(segment_2))
         base[segment_3] = rng.exponential(scale=0.7 * std, size=len(segment_3)) + mean - 0.5 * std
 
-    elif biomarker in ["AB", "P-Tau"]:
+    elif biomarker in ["ABETA", "PTAU", "TAU", "FDG"]:
         # CSF biomarkers: Pareto + Uniform + Logistic mixture
         base[segment_1] = rng.pareto(1.5, size=len(segment_1)) * std + mean - 2 * std
         base[segment_2] = rng.uniform(mean - 1.5 * std, mean + 1.5 * std, size=len(segment_2))
         base[segment_3] = rng.logistic(loc=mean, scale=std, size=len(segment_3))
 
-    elif biomarker in ["HIP-FCI", "HIP-GMI"]:
+    elif biomarker in ["VentricleNorm", "HippocampusNorm"]:
         # Hippocampus metrics: Beta + Exponential + Modified normal
         base[segment_1] = rng.beta(0.5, 0.5, size=len(segment_1)) * 4 * std + mean - 2 * std
         base[segment_2] = rng.exponential(scale=std * 0.4, size=len(segment_2)) * rng.choice([-1, 1], size=len(segment_2)) + mean
         base[segment_3] = rng.normal(mean, std * 0.5, size=len(segment_3)) + rng.choice([0, std * 2], size=len(segment_3))
 
-    elif biomarker in ["AVLT-Sum", "PCC-FCI"]:
+    elif biomarker in ["WholeBrainNorm", "EntorhinalNorm"]:
         # Memory and PCC metrics: Gamma + Weibull + Normal with spikes
         base[segment_1] = rng.gamma(shape=2, scale=0.5 * std, size=len(segment_1)) + mean - std
         base[segment_2] = rng.weibull(1.0, size=len(segment_2)) * std + mean - std
         base[segment_3] = rng.normal(mean, std * 0.5, size=len(segment_3)) + rng.choice([-1, 1], size=len(segment_3)) * std
 
-    elif biomarker == "FUS-GMI":
+    elif biomarker == "FusiformNorm":
         # Fusiform gyrus GMI: Heavy-tailed Cauchy with normal noise
         raw = rng.standard_cauchy(size=size) * std + mean
         raw += rng.normal(0, 0.2 * std, size=size)
         base = np.clip(raw, mean - 4 * std, mean + 4 * std)
 
-    elif biomarker == "FUS-FCI":
+    elif biomarker == "MidTempNorm":
         # Fusiform gyrus FCI: Bimodal with sharp spike
         spike_size = size // 10
         base[:spike_size] = rng.normal(mean, 0.2 * std, size=spike_size)
@@ -97,7 +97,7 @@ def very_irregular_distribution(
 
     return base
 
-def generate_measurements_kjOrdinal(
+def generate_measurements_ebm(
     params: Dict[str, Dict[str, float]], 
     event_time_dict: Dict[str, float], 
     shuffled_biomarkers: np.ndarray, 
@@ -182,7 +182,7 @@ def generate_measurements_kjOrdinal(
             data.append(record)
     return data
 
-def generate_measurements_kjContinuous(
+def generate_measurements_sigmoid(
     experiment_name: str,
     event_time_dict: Dict[str, float],
     all_kjs: np.ndarray,
@@ -280,6 +280,13 @@ def generate_measurements_kjContinuous(
 
 def generate_data(
         filename:str,
+        padded_ordering_array:np.ndarray,
+        mixed_pathology:bool,
+        mp_method:str, 
+        mcmc_iterations:int, 
+        pl_best:bool,
+        mallows_temperature:float,
+        int2str:Dict[int, str],
         experiment_name: str,
         params: Dict[str, Dict[str, float]],
         n_participants: int,
@@ -295,6 +302,7 @@ def generate_data(
         noise_std_parameter:float,
         true_order_and_stages_dict: Dict[str, Dict[str, int]],
         rng:np.random.Generator,
+        save2file:bool=True,
     ) -> pd.DataFrame:
     """
     Simulate an Event-Based Model (EBM) for disease progression and generate a dataset.
@@ -331,11 +339,39 @@ def generate_data(
     # This is correct. Biomarkers are shuffled and initial event_times are 1 to max_stage
 
     # If fixed biomarker order, I'll use the order as in the params
-    if fixed_biomarker_order:
-        shuffled_biomarkers = np.array(list(params.keys()))
-    # Otherwise, randomize the order
+    if mixed_pathology:
+        if fixed_biomarker_order:
+            shuffled_biomarkers = np.array(list(params.keys()))
+        # Otherwise, randomize the order
+        else:
+            if mp_method == 'Random':
+                # if random, then get just randomly shuffle the unique items
+                shuffled_biomarkers = np.array(
+                    sorted(set(item for ordering in padded_ordering_array for item in ordering if item != -1)),
+                    dtype=np.int64
+                )
+                rng.shuffle(shuffled_biomarkers)
+            else:
+                # combined ordering is the full rank based on the padded partial ranks
+                shuffled_biomarkers = mp_utils.get_combined_order(
+                    padded_partial_orders=padded_ordering_array, 
+                    rng=rng, 
+                    method=mp_method, 
+                    mcmc_iterations=mcmc_iterations, 
+                    pl_best=pl_best,
+                    mallows_temperature=mallows_temperature
+                )
+                params = mp_utils.get_final_params(params, shuffled_biomarkers, padded_ordering_array, int2str, rng)
     else:
-        shuffled_biomarkers = rng.permutation(np.array(list(params.keys())))
+        if fixed_biomarker_order:
+            shuffled_biomarkers = np.array(list(params.keys()))
+        else:
+            shuffled_biomarkers = rng.permutation(np.array(list(params.keys())))
+
+    # After shuffled_biomarkers is decided
+    if isinstance(shuffled_biomarkers[0], (np.integer, int)):
+        shuffled_biomarkers = np.array([int2str[i] for i in shuffled_biomarkers])
+
     max_stage = len(shuffled_biomarkers)
     event_times = np.arange(1, max_stage+1)
 
@@ -346,7 +382,7 @@ def generate_data(
     # ================================================================
     # Core generation logic based on experiment type
     # ================================================================
-
+    # exp 1-4
     if "kjOrdinal" in experiment_name:
         # Ordinal disease stage experiments (stages are discrete integers)
         
@@ -387,15 +423,16 @@ def generate_data(
         all_diseased = all_diseased[shuffle_idx]
 
         # Generate measurements for all participants and biomarkers
-        data = generate_measurements_kjOrdinal(
+        data = generate_measurements_ebm(
             params, event_time_dict, shuffled_biomarkers, experiment_name, all_kjs, 
             all_diseased, keep_all_cols, rng=rng)
 
         # For oridinal kjs and Sn, just use the kjs directly
         true_stages = [int(x) for x in all_kjs]
-    
+    # kj continuous 
     else:
         # Continuous disease stage experiments (stages are real numbers)
+        epsilon = 1e-8  # a small value
         
         # Generate continuous event times for biomarkers
         if experiment_name.startswith('xi'):
@@ -403,9 +440,12 @@ def generate_data(
             event_time_raw = rng.beta(
                 a=beta_params['near_normal']['alpha'], 
                 b=beta_params['near_normal']['beta'], 
-                size=max_stage)
-            # Scale to [0, max_stage]
+                size=max_stage) + epsilon
+            
+            # Scale event times to (0, max_stage], but we are not forcing max(event times) to be max_stage.
             event_times = event_time_raw * max_stage
+            # Force scaling so that max(event_times) = max_stage - 1
+            # event_times = event_time_raw * ((max_stage - 1) / event_time_raw.max())
         
         # Assign event times to biomarkers
         event_time_dict = dict(zip(shuffled_biomarkers, event_times))
@@ -417,19 +457,18 @@ def generate_data(
                 a=beta_params['uniform']['alpha'],
                 b=beta_params['uniform']['beta'],
                 size=n_diseased
-            )
+            ) + epsilon
         else:
             # Use skewed beta for disease stages
             disease_stages_raw = rng.beta(
                 a=beta_params['regular']['alpha'],
                 b=beta_params['regular']['beta'],
                 size=n_diseased
-            )
+            ) + epsilon
             
-        # Scale disease stages to (0, max_stage]
-        epsilon = 1e-8  # a small value
-        disease_stages = np.clip(disease_stages_raw * max_stage, epsilon, max_stage)
-
+        # Scale disease stages to (0, max_stage], but we are not forcing max(disease_stages) to be max_stage.
+        disease_stages = disease_stages_raw * max_stage
+    
         # Combine with healthy participants (stage 0)
         all_kjs = np.concatenate([np.zeros(n_healthy), disease_stages])
         all_diseased = all_kjs > 0 
@@ -439,18 +478,25 @@ def generate_data(
         all_kjs = all_kjs[shuffle_idx]
         all_diseased = all_diseased[shuffle_idx]
 
-        # Generate measurements using continuous disease progression model
-        data = generate_measurements_kjContinuous(
-            experiment_name, event_time_dict, all_kjs, all_diseased, 
-            shuffled_biomarkers, params, keep_all_cols, noise_std_parameter=noise_std_parameter, rng=rng)
-        
+        if 'sigmoid' in experiment_name:
+            # Generate measurements for the sigmoid model
+            data = generate_measurements_sigmoid(
+                experiment_name, event_time_dict, all_kjs, all_diseased, 
+                shuffled_biomarkers, params, keep_all_cols, noise_std_parameter=noise_std_parameter, rng=rng)
+        else:
+            # generate measurements for ebm model 
+            data = generate_measurements_ebm(
+                params, event_time_dict, shuffled_biomarkers, experiment_name, all_kjs, 
+                all_diseased, keep_all_cols, rng=rng)
+            
         sorted_event_times = sorted(event_times)
         true_stages = [get_rank(sorted_event_times, x) for x in all_kjs]
 
     # Create DataFrame and save to CSV
     df = pd.DataFrame(data)
-    # Write to CSV
-    df.to_csv(os.path.join(output_dir, f"{filename}.csv"), index=False)
+    if save2file:
+        # Write to CSV
+        df.to_csv(os.path.join(output_dir, f"{filename}.csv"), index=False)
 
     # Store the ground truth biomarker ordering for evaluation
     # Sort biomarkers by their event time and assign ordinal, sequential indices (1-based)
@@ -506,12 +552,14 @@ def generate(
     prefix: Optional[str] = None,
     suffix: Optional[str] = None,
     keep_all_cols: bool = False ,
-    fixed_biomarker_order: bool = False,
+    fixed_biomarker_order: bool = True,
     noise_std_parameter: float = 0.05,
-    mp_method: Optional[str] = "BT", # 'PL', 'BT', 'Pairwise', 'Mallows_Tau', 'Mallows_RMJ', 'random'
+    mp_method: Optional[str] = "BT", # 'PL', 'BT', 'Pairwise', 'Mallows_Tau', 'Mallows_RMJ', 'Random'
     sample_count: Optional[int] = 1000 , # how many samples of combined orderings to obtain when calculating certainty
     mcmc_iterations: Optional[int] = 100,
-    pl_best:bool=True # in PL framework, sample a random one or through MCMC to get the best one
+    pl_best:bool=False, # in PL framework, sample a random one or through MCMC to get the best one
+    mallows_temperature:float=1.0,
+    save_data:bool=True, # whether to save data or only get the padded partial ranks meta data. 
 ) -> Dict[str, Dict[str, int]]:
     """
     Generate multiple datasets for different experimental configurations.
@@ -601,59 +649,60 @@ def generate(
                 - Calculate conflict and certainty of this group of partial orderings.
                 - Remember to save the two partial orderings, conflict and certainty to the `true_order_and_stages.json`. 
                 """
+                padded_ordering_array = None 
                 if mixed_pathology:
-                    conflict = None
-                    certainty = None
-                    conflict2 = None 
-                    fixed_biomarker_order = True # if mixed pathology, we have to use the order in `params_to_use`
+                    # fixed_biomarker_order = True # if mixed pathology, we have to use the order in `params_to_use`
+                    # these are the padded partial rankings
                     padded_ordering_array = mp_utils.get_padded_partial_orders(
                         biomarkers_int=biomarkers_int, low_num=low_num, 
                         low_length=low_length, high_length=high_length, 
                         high_num=high_num, rng=sub_rng)
                     
-                    if mp_method != 'random':
-                        combined_ordering = mp_utils.get_combined_order(
-                            padded_partial_orders=padded_ordering_array, 
-                            rng=sub_rng, method=mp_method, mcmc_iterations=mcmc_iterations, pl_best=pl_best)
-                    else:
-                        combined_ordering = np.array(
-                            sorted(set(item for ordering in padded_ordering_array for item in ordering if item != -1)),
-                            dtype=np.int64
-                        )
-                        rng.shuffle(combined_ordering)
-                    
-                    new_params = mp_utils.get_final_params(params, combined_ordering, padded_ordering_array, int2str)
-                    if mp_method != 'random':
-                        if sample_count > 1:
-                            conflict = mp_utils.compute_conflict(padded_ordering_array)
-                            conflict2 = mp_utils.compute_conflict2(padded_ordering_array)
-                        if mp_method == 'PL':
-                            PL = mp_utils.PlackettLuce(ordering_array=padded_ordering_array, rng=sub_rng, 
-                                                    sample_count=sample_count, pl_best=pl_best)
-                            if sample_count > 1:
-                                certainty = PL.compute_certainty()
-                        else:
-                            mcmc_sampler = mp_utils.MCMC(ordering_array=padded_ordering_array, method=mp_method, 
-                                                        sample_count=sample_count, rng=sub_rng, mcmc_iterations=mcmc_iterations)
-                            if sample_count > 1:
-                                certainty = mcmc_sampler.compute_certainty()
                     true_order_and_stages_dict[filename]['mp_method'] = mp_method
                     true_order_and_stages_dict[filename]['n_partial_rankings'] = len(padded_ordering_array)
                     true_order_and_stages_dict[filename]['ordering_array'] = padded_ordering_array
-                    if sample_count > 1:
-                        true_order_and_stages_dict[filename]['conflict'] = conflict
-                        true_order_and_stages_dict[filename]['conflict2'] = conflict2
-                        true_order_and_stages_dict[filename]['certainty'] = certainty
-                    params_to_use = new_params
+                    
+                    if fixed_biomarker_order:
+                        if mp_method == 'Random':
+                            # if random, then get just randomly shuffle the unique items
+                            combined_ordering = np.array(
+                                sorted(set(item for ordering in padded_ordering_array for item in ordering if item != -1)),
+                                dtype=np.int64
+                            )
+                            rng.shuffle(combined_ordering)
+                        else:
+                            # combined ordering is the full rank based on the padded partial ranks
+                            combined_ordering = mp_utils.get_combined_order(
+                                padded_partial_orders=padded_ordering_array, 
+                                rng=sub_rng, 
+                                method=mp_method, 
+                                mcmc_iterations=mcmc_iterations, 
+                                pl_best=pl_best,
+                                mallows_temperature=mallows_temperature
+                            )
+                        # get the new params (basically to order the dict according to combined_ordering)    
+                        new_params = mp_utils.get_final_params(params, combined_ordering, padded_ordering_array, int2str, rng)
+                        params_to_use = new_params
+                    else: params_to_use = params
                 else:
                     params_to_use = params
-
+                
+                if not save_data:
+                    # if i do not want the actual data, just skip the generation procedure below. 
+                    continue 
                 if len(params_to_use) != len(dirichlet_alpha['multinomial']):
                     dirichlet_alpha['multinomial'] = dirichlet_near_normal(n_biomarkers=len(params_to_use))
                 
                 # Generate a single dataset with the current parameter combination
                 generate_data(
                     filename=filename,
+                    mixed_pathology=mixed_pathology,
+                    padded_ordering_array=padded_ordering_array,
+                    mp_method=mp_method, 
+                    mcmc_iterations=mcmc_iterations, 
+                    pl_best=pl_best,
+                    mallows_temperature=mallows_temperature,
+                    int2str=int2str,
                     experiment_name=experiment_name,
                     params = params_to_use,
                     n_participants=participant_count,

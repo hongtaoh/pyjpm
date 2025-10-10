@@ -8,21 +8,16 @@ import time
 import numpy as np
 import sys 
 from sklearn.metrics import mean_absolute_error
-
-# Import utility functions
-from .utils import (setup_logging, 
-                   extract_fname, 
-                   cleanup_old_files, 
-                   compute_unbiased_stage_likelihoods)
-from .viz import save_heatmap, save_traceplot
-# Import algorithms
+import pysaebm.utils as utils
 from .mh import metropolis_hastings
+from pympebm.utils import convert_np_types
+from .viz import save_heatmap, save_traceplot
+
 
 def run_mpebm(
     data_file: str,
     output_dir: Optional[str]=None,
     partial_rankings:Optional[np.ndarray] = np.array([]),
-    theta_phi_use:Optional[Dict[str, float]] = {},
     bm2int: Optional[Dict[str, int]] = dict(), 
     mp_method:Optional[str] = None,
     output_folder: Optional[str] = None,
@@ -32,20 +27,16 @@ def run_mpebm(
     thinning: int = 1,
     true_order_dict: Optional[Dict[str, int]] = None,
     true_stages: Optional[List[int]] = None,
-    plot_title_detail: Optional[str] = "",
     fname_prefix: Optional[str] = "",
-    skip_heatmap: Optional[bool] = True,
-    skip_traceplot: Optional[bool] = True,
     # Strength of the prior belief in prior estimate of the mean (μ), set to 1 as default
     prior_n: float = 1.0,
     # Prior degrees of freedom, influencing the certainty of prior estimate of the variance (σ²), set to 1 as default
     prior_v: float = 1.0,
     seed: int = 123,
     save_results:bool=True,
-    save_details:bool=False,
-    save_theta_phi:bool=False,
-    save_stage_post:bool=False
-) -> Dict[str, Union[str, int, float, Dict, List]]:
+    save_plots:bool=False,
+    mallows_temperature:float=1.0,
+):
     """
     Run the metropolis hastings algorithm and save results 
 
@@ -85,34 +76,19 @@ def run_mpebm(
             output_dir = os.path.join(output_dir, output_folder)
         else:
             output_dir = os.path.join(output_dir)
-    fname = extract_fname(data_file)
+    fname = utils.extract_fname(data_file)
 
     # First do cleanup
     logging.info(f"Starting cleanup ...")
-    cleanup_old_files(output_dir, fname)
+    utils.cleanup_old_files(output_dir, fname)
 
     if save_results:
 
         # Then create directories
         os.makedirs(output_dir, exist_ok=True)
-
-        heatmap_folder = os.path.join(output_dir, "heatmaps")
-        traceplot_folder = os.path.join(output_dir, "traceplots")
         results_folder = os.path.join(output_dir, "results")
-        # logs_folder = os.path.join(output_dir, "records")
-
-        if not skip_heatmap:
-            os.makedirs(heatmap_folder, exist_ok=True)
-        if not skip_traceplot:
-            os.makedirs(traceplot_folder, exist_ok=True)
         os.makedirs(results_folder, exist_ok=True)
-        # os.makedirs(logs_folder, exist_ok=True)
-
-        # # Finally set up logging
-        # log_file = os.path.join(logs_folder, f"{fname_prefix}{fname}.log")
-        # setup_logging(log_file)
-
-
+     
         # Finally set up logging (console only, no file)
         logging.basicConfig(
             level=logging.INFO,
@@ -120,8 +96,6 @@ def run_mpebm(
             handlers=[logging.StreamHandler(sys.stdout)],
             force=True
         )
-
-
 
     # Log the start of the run
     logging.info(f"Running {fname}")
@@ -144,21 +118,7 @@ def run_mpebm(
         # convert biomarker names in string to intergers, according to the str2int mapper
         biomarkers_int = np.array([bm2int[x] for x in biomarker_names])
     n_biomarkers = len(biomarker_names)
-    n_stages = n_biomarkers + 1
     logging.info(f"Number of biomarkers: {n_biomarkers}")
-
-    theta_phi_use_matrix = np.array([])
-    if len(theta_phi_use)>0:
-        # Convert theta_phi_use from dict to np.ndarray, and according to the order in biomarker_names
-        theta_phi_use_matrix = np.zeros((n_biomarkers, 4), dtype=np.float64)
-        for idx, bm_str in enumerate(biomarker_names):
-            res = theta_phi_use[bm_str]
-            theta_phi_use_matrix[idx] = np.array([
-                res['theta_mean'],
-                res['theta_std'],
-                res['phi_mean'],
-                res['phi_std']
-            ], dtype=np.float64)
 
     n_participants = len(data.participant.unique())
 
@@ -175,147 +135,98 @@ def run_mpebm(
     data_matrix = dff.to_numpy()
     diseased_arr = np.array([int(diseased_dict[x]) for x in range(n_participants)])
 
-    non_diseased_ids = np.where(diseased_arr == 0)[0]
-    healthy_ratio = len(non_diseased_ids)/n_participants
-
     # Run the Metropolis-Hastings algorithm
     try:
-        accepted_orders, log_likelihoods, final_theta_phi, final_stage_post, current_pi = metropolis_hastings(
-            partial_rankings=partial_rankings, mp_method=mp_method, theta_phi_use_matrix = theta_phi_use_matrix, 
+        all_orders, all_loglikes, best_order, best_log_likelihood, best_theta_phi = metropolis_hastings(
+            partial_rankings=partial_rankings, mp_method=mp_method, 
             data_matrix=data_matrix, diseased_arr=diseased_arr, biomarkers_int=biomarkers_int,
-            iterations = n_iter, n_shuffle = n_shuffle, prior_n=prior_n, prior_v=prior_v, rng=rng
+            iterations = n_iter, n_shuffle = n_shuffle, prior_n=prior_n, prior_v=prior_v, rng=rng, 
+            mallows_temperature = mallows_temperature, burn_in=burn_in,
         )
     except Exception as e:
         logging.error(f"Error in Metropolis-Hastings algorithm: {e}")
         raise
 
-    # Get the order associated with the highet log likelihoods
-    # This is the indices for biomarkers_int
-    # Because biomarkers_int corresponds to biomarker_names, which in the same ordering as true_order_dict,
-    # we can compare dirctly order_with_highest_ll with true_order_dict.values
-    order_with_highest_ll = accepted_orders[log_likelihoods.index(max(log_likelihoods))]
-    # unique_items is in the the same order as as dict(sorted(true_order_dict.items())), and biomarker_names
-    # they are all the same
-    if true_order_dict:
-        # Sort both dicts by the key to make sure they are comparable
-        true_order_dict = dict(sorted(true_order_dict.items()))
-        tau, p_value = kendalltau(order_with_highest_ll, list(true_order_dict.values()))
-        tau = (1-tau)*0.5
-    else:
-        tau, p_value = None, None
+    if save_plots:
+        heatmap_folder = os.path.join(output_dir, "heatmaps")
+        os.makedirs(heatmap_folder, exist_ok=True)
+        traceplot_folder = os.path.join(output_dir, "traceplots")
+        os.makedirs(traceplot_folder, exist_ok=True)
 
-    # Save heatmap
-    if save_results and not skip_heatmap:
-        try:
-            save_heatmap(
-                accepted_orders,
-                burn_in,
-                thinning,
-                folder_name=heatmap_folder,
-                file_name=f"{fname_prefix}{fname}_heatmap",
-                title=f"Ordering Result {plot_title_detail}",
-                biomarker_names=biomarker_names,
-                best_order=order_with_highest_ll
-            )
-        except Exception as e:
-            logging.error(f"Error generating heatmap: {e}")
-            raise
 
-    # Save trace plot
-    if save_results and not skip_traceplot:
         try:
             save_traceplot(
-                log_likelihoods,
+                all_loglikes,
                 folder_name=traceplot_folder,
                 file_name=f"{fname_prefix}{fname}_traceplot",
-                title=f"Traceplot of Log Likelihoods {plot_title_detail}"
+                title=f"Traceplot of Log Likelihoods"
             )
         except Exception as e:
             logging.error(f"Error generating trace plot: {e}")
             raise
 
-    updated_pi = np.array([healthy_ratio] + \
-        [(1 - healthy_ratio) * x for x in current_pi])
-    
-   
-    final_stage_post = compute_unbiased_stage_likelihoods(
-        n_participants, data_matrix, order_with_highest_ll, final_theta_phi, updated_pi, n_stages
-    )
-    ml_stages = [
-        rng.choice(len(final_stage_post[pid]), p=final_stage_post[pid])
-        for pid in range(n_participants)
-    ]
+        try:
+            save_heatmap(
+                all_orders,
+                burn_in,
+                thinning,
+                folder_name=heatmap_folder,
+                file_name=f"{fname_prefix}{fname}_heatmap",
+                title=f"Ordering Result",
+                biomarker_names=biomarker_names,
+                best_order=best_order
+            )
+        except Exception as e:
+            logging.error(f"Error generating heatmap: {e}")
+            raise
 
+    # Get the order associated with the highet log likelihoods
+    tau = None 
     mae = None
-    true_order_result = None
-
-    if true_stages:
-        mae = mean_absolute_error(true_stages, ml_stages)
     if true_order_dict:
-        true_order_result = {k: int(v) for k, v in true_order_dict.items()}
-    
-    final_stage_post_dict = {}
-    if save_details or save_stage_post:
-        for p in range(n_participants):
-            final_stage_post_dict[p] = final_stage_post[p].tolist()
-    
-    final_theta_phi_dict = {}
-    if save_details or save_theta_phi:
-        for idx, bm_str in enumerate(biomarker_names):
-            params = final_theta_phi[idx]
-            final_theta_phi_dict[bm_str] = {
-                'theta_mean': float(params[0]),
-                'theta_std': float(params[1]),
-                'phi_mean': float(params[2]),
-                'phi_std': float(params[3])
-            }
+        # Sort both dicts by the key to make sure they are comparable
+        # because the best order is the indices of the biomarkers in the order of sorted(true_order_dict.items())
+        true_order_dict = dict(sorted(true_order_dict.items()))
+        true_order_indices = np.array(list(true_order_dict.values())) 
+        tau, _ = kendalltau(best_order, true_order_indices)
+        tau = (1-tau)/2
 
-    end_time = time.time()
-    if save_details:
-        results = {
-            "runtime": end_time - start_time,
-            "N_MCMC": n_iter,
-            "n_shuffle": n_shuffle,
-            "burn_in": burn_in,
-            "thinning": thinning,
-            'healthy_ratio': healthy_ratio,
-            "max_log_likelihood": float(max(log_likelihoods)),
-            "kendalls_tau": tau,
-            "p_value": p_value,
-            "mean_absolute_error": mae,
-            'current_pi': current_pi.tolist(),
-            # updated pi is the pi for all stages, including 0
-            'updated_pi': updated_pi.tolist(),
-            'true_order': true_order_result,
-            "order_with_highest_ll": {k: int(v) for k, v in zip(biomarker_names, order_with_highest_ll)},
-            "true_stages": true_stages,
-            'ml_stages': ml_stages,
-            "stage_likelihood_posterior": final_stage_post_dict,
-            "final_theta_phi_params": final_theta_phi_dict,
-        }
-    else:
-        results = {
-            "runtime": end_time - start_time,
-            "kendalls_tau": tau,
-            "order_with_highest_ll": {k: int(v) for k, v in zip(biomarker_names, order_with_highest_ll)},
-            "mean_absolute_error": mae,
-            "final_theta_phi_params": final_theta_phi_dict
-        }
-    
     if save_results:
+        _, ml_stages, _ = utils.stage_with_plugin_pi_em(
+            data_matrix=data_matrix,
+            order_with_highest_ll=best_order, # no need to + 1 because in pympebm, the order starts from 1 already. 
+            # this in fact is more okay, because current_order, the ordering index always starts from 1. 
+            # in inference with label, the disease stages, or stage_post, has n_biomarker diseases starting from 1
+            # but in blind inference, we have n_stages, starting from 0. 
+            final_theta_phi=best_theta_phi,
+            rng=rng,
+            max_iter=200,
+            tol=1e-6
+        )
+        if true_stages:
+            # mae_sampling = mean_absolute_error(true_stages, ml_stages_sampling)
+            mae = mean_absolute_error(true_stages, ml_stages)
+
+        end_time = time.time()
+
+        results = {
+            "runtime": end_time - start_time,
+            "max_log_likelihood": best_log_likelihood,
+            "kendalls_tau": tau,
+            "mean_absolute_error": mae,
+            "order_with_highest_ll": {k: int(v) for k, v in zip(biomarker_names, best_order)}
+        }
         # Save results
         try:
             with open(f"{results_folder}/{fname_prefix}{fname}_results.json", "w") as f:
-                json.dump(results, f, indent=4)
+                json.dump(convert_np_types(results), f, indent=4)
         except Exception as e:
             logging.error(f"Error writing results to file: {e}")
             raise
         logging.info(f"Results saved to {results_folder}/{fname_prefix}{fname}_results.json")
 
-    # # Clean up logging handlers
-    # logger = logging.getLogger()
-    # for handler in logger.handlers[:]:
-    #     handler.close()
-    #     logger.removeHandler(handler)
+        return best_order, results 
+    else:     
+        order_dict = {k: int(v) for k, v in zip(biomarker_names, best_order)}
 
-    return results
+        return best_order, order_dict

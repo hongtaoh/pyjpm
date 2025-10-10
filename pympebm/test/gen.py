@@ -3,6 +3,7 @@ import numpy as np
 import json 
 import re 
 import os 
+import yaml
 
 def extract_components(filename):
     pattern = r'^j(\d+)_r([\d.]+)_E(.*?)_m(\d+)$'
@@ -10,18 +11,6 @@ def extract_components(filename):
     if match:
         return match.groups()  # returns tuple (J, R, E, M)
     return None
-
-experiment_names = [
-    # "sn_kjOrdinalDM_xnjNormal",     # Experiment 1: Ordinal kj with Dirichlet-Multinomial, Normal Xnj
-    "sn_kjOrdinalDM_xnjNonNormal",  # Experiment 2: Ordinal kj with Dirichlet-Multinomial, Non-Normal Xnj
-    # "sn_kjOrdinalUniform_xnjNormal", # Experiment 3: Ordinal kj with Uniform distribution, Normal Xnj
-    # "sn_kjOrdinalUniform_xnjNonNormal", # Experiment 4: Ordinal kj with Uniform distribution, Non-Normal Xnj
-    # "sn_kjContinuousUniform",       # Experiment 5: Continuous kj with Uniform distribution
-    # "sn_kjContinuousBeta",          # Experiment 6: Continuous kj with Beta distribution
-    # "xiNearNormal_kjContinuousUniform", # Experiment 7: Near-normal Xi with Continuous Uniform kj
-    # "xiNearNormal_kjContinuousBeta", # Experiment 8: Near-normal Xi with Continuous Beta kj
-    "xiNearNormalWithNoise_kjContinuousBeta", # Experiment 9: Same as Exp 8 but with noises to xi
-]
 
 def convert_np_types(obj):
     """Convert numpy types in a nested dictionary to Python standard types."""
@@ -40,9 +29,11 @@ def convert_np_types(obj):
 
 
 if __name__ == '__main__':
+    with open('config.yaml', 'r') as f:
+        config = yaml.safe_load(f)
     rng = np.random.default_rng(53)
-
-    OUTPUT_DIR = 'my_data'
+    cwd = os.path.dirname(__file__)
+    OUTPUT_DIR = os.path.join(cwd, "my_data")
     # Get path to default parameters
     params_file = get_params_path()
 
@@ -54,30 +45,33 @@ if __name__ == '__main__':
     int2str = dict(zip(biomarkers_int, biomarkers_str))
 
     # dict to store the true order and stages 
+    # for mp_method in ['Mallows_Tau', 'BT', 'PL', 'Pairwise', 'Random']:
     for mp_method in ['BT']:
         all_exp_dicts = []
-        for exp_name in experiment_names:
+        for exp_name in config['EXPERIMENT_NAMES']:
             random_state = rng.integers(0, 2**32 - 1)
             # biomarker event time dict
             bm_et_dict = generate(
                         mixed_pathology=True,
                         experiment_name = exp_name,
                         params_file=params_file,
-                        js = [50],
-                        rs = [0.1, 0.25, 0.5, 0.75, 0.9],
-                        num_of_datasets_per_combination=2,
+                        js = [100],
+                        rs = [0.25],
+                        num_of_datasets_per_combination=10,
                         output_dir=os.path.join(OUTPUT_DIR, mp_method),
                         seed=random_state,
                         keep_all_cols = False,
-                        fixed_biomarker_order = False, # to randomize things
+                        fixed_biomarker_order = False, # we want each participant to have different progression
                         mp_method=mp_method,
                         sample_count = 1,
-                        mcmc_iterations = 1000,
+                        mcmc_iterations = 500,
                         low_num=2, # lowest possible number of n_partial_rankings
                         high_num=4,
                         low_length=3, # shortest possible partial ranking length
                         high_length=15, # longest possible partial ranking length
-                        pl_best=True
+                        pl_best=False, 
+                        mallows_temperature=1,
+                        save_data=True
                     )
             all_exp_dicts.append(bm_et_dict)
 
@@ -87,7 +81,7 @@ if __name__ == '__main__':
         combined = convert_np_types(combined)
 
         # Dump the JSON
-        with open(f"true_order_and_stages_{mp_method}.json", "w") as f:
+        with open(f"{cwd}/true_order_and_stages_{mp_method}.json", "w") as f:
             json.dump(combined, f, indent=2)
 
         """
@@ -112,7 +106,7 @@ if __name__ == '__main__':
                     mixed_pathology=False,
                     experiment_name = E,
                     params=partial_params,
-                    js = [int(J)],
+                    js = [int(J)*3],
                     rs = [float(R)],
                     num_of_datasets_per_combination=1,
                     output_dir=os.path.join(OUTPUT_DIR, mp_method),
@@ -122,6 +116,7 @@ if __name__ == '__main__':
                     # the ith partial ranking for fname
                     # note that the generated pr file will also have j200_r0.25_Ee
                     prefix=f"PR{idx}_m{M}",
+                    save_data=True
                 )
     
 

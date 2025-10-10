@@ -1,60 +1,17 @@
-from typing import List, Tuple, Dict, Set, Iterable
+from typing import List, Tuple, Dict
 import numpy as np
-from collections import defaultdict, deque, Counter
-from scipy.stats import kendalltau
+from collections import defaultdict, Counter
 from scipy.optimize import minimize
-from itertools import combinations
-from numba import njit 
+from numba import njit
 from numba.typed import List as NumbaList
+from scipy.stats import  spearmanr
 
 EPSILON = 1e-12
 
-def merge_mean_dicts(dicts: Iterable[Dict[str, Dict[str, float]]]) -> Dict[str, Dict[str, float]]:
-    """
-    Merge dicts of dicts. 
-    If an item appears more than once, average its inner float values.
-    """
-    sums = defaultdict(lambda: defaultdict(float))
-    counts = defaultdict(lambda: defaultdict(int))
-
-    for d in dicts:
-        for biomarker, param_dict in d.items():
-            for param_name, val in param_dict.items():
-                sums[biomarker][param_name] += val 
-                counts[biomarker][param_name] += 1
-    # Compute means 
-    result = {}
-    for biomarker, param_sums in sums.items():
-        result[biomarker] = {}
-        for param_name, total in param_sums.items():
-            result[biomarker][param_name] = total/counts[biomarker][param_name]
-
-    return result 
-
-def compute_conflict(ordering_array: np.ndarray) -> float:
-    conflict_pairs = 0
-    total_pairs = 0
-    # common items
-    all_items = np.array(sorted(set(item for ordering in ordering_array for item in ordering)))
-
-    # compare each pair (a, b)
-    for a, b in combinations(all_items, 2):
-        pair_orders = []
-        for ordering in ordering_array:
-            ordering = list(ordering)
-            if np.isin(a, ordering) and np.isin(b, ordering):
-                # record 1 if a before b, 0 if b before a
-                idx_a = np.where(ordering == a)[0][0]
-                idx_b = np.where(ordering == b)[0][0]
-                pair_orders.append(idx_a < idx_b)
-        if len(pair_orders) >= 2:
-            total_pairs += 1
-            if any(v != pair_orders[0] for v in pair_orders[1:]):
-                conflict_pairs += 1
-    return conflict_pairs/total_pairs if total_pairs > 0 else 0.0
-
-@njit
+@njit(fastmath=False, parallel=False)
+# @njit(parallel=True)
 def rankings_to_matrix(rankings):
+    # each ranking consists of unique items, rather than consecutive integers
     n_raters, n_items = rankings.shape
     int_rankings = np.zeros((n_raters, n_items), dtype=np.int64)
     for idx in range(n_raters):
@@ -62,7 +19,7 @@ def rankings_to_matrix(rankings):
         int_rankings[idx] = np.argsort(rankings[idx])
     return int_rankings
 
-@njit 
+@njit(fastmath=False, parallel=False) 
 def kendalls_w(rank_matrix: np.ndarray):
     """
     Compute Kendall's W (coefficient of concordance) for complete rankings without ties.
@@ -70,8 +27,8 @@ def kendalls_w(rank_matrix: np.ndarray):
     Parameters
     ----------
     rank_matrix : ndarray of shape (n_raters, n_items)
-        Each row is a rater's ranking of the items (1 = best, n_items = worst).
-        All rankings must be complete permutations of 1..n_items.
+        Each row is a rater's ranking of the the same items (in the same order)
+        All rankings must be complete permutations of 0..n_items-1.
 
     Returns
     -------
@@ -92,6 +49,142 @@ def kendalls_w(rank_matrix: np.ndarray):
     # Kendall's W formula (no ties)
     W = 12 * SS / (n_raters**2 * (n_items**3 - n_items))
     return W
+
+
+# # ----------------------------
+# # 2) Pad & deduplicate fast
+# # ----------------------------
+# def _pad_rows(partial_rankings: List[np.ndarray], pad_value: int = -1) -> np.ndarray:
+#     """
+#     Efficient padding with a single pass; uses NumPy arrays internally.
+#     """
+#     if not partial_rankings:
+#         return np.empty((0, 0), dtype=int)
+#     lengths = np.fromiter((len(r) for r in partial_rankings), dtype=int, count=len(partial_rankings))
+#     max_len = int(lengths.max())
+#     out = np.full((len(partial_rankings), max_len), pad_value, dtype=int)
+#     for i, r in enumerate(partial_rankings):
+#         out[i, :len(r)] = r
+#     return out
+
+# # ----------------------------
+# # 3) One-shot generator for unique, padded partial orders
+# # ----------------------------
+# def get_padded_partial_orders(
+#     biomarkers_int: np.ndarray,  # biomarkers in int form
+#     low_num: int,                # lowest possible number of partial rankings
+#     high_num: int,
+#     low_length: int,             # lowest possible length of each partial ranking
+#     high_length: int, 
+#     rng: np.random.Generator,
+# ) -> np.ndarray:
+#     """
+#     Generate N unique partial orders, pad them with -1, and return as an array.
+#     Strategy:
+#       - Sample desired lengths.
+#       - Over-generate candidates in batches, pad, uniquify, keep-first N.
+#       - This avoids the while-loop that regenerates everything on any collision.
+#     """
+#     n_target = int(rng.integers(low_num, high_num + 1))
+#     # note: np.arange(high) excludes high, so add 1 to be inclusive if wanted
+#     lengths = rng.integers(low_length, high_length + 1, size=n_target, dtype=int)
+
+#     collected = []
+#     seen = set()  # hash tuples of sequences (no padding) for dedup
+#     N = biomarkers_int.shape[0]
+
+#     # batch size heuristic: generate a bit more than needed to reduce repeats
+#     batch = max(8, int(np.ceil(n_target * 1.3)))
+
+#     while len(collected) < n_target:
+#         # Make a batch, then filter uniques quickly
+#         # Generate a single permutation matrix for the batch
+#         scores = rng.random((batch, N))
+#         perm_idx = np.argsort(scores, axis=1)
+#         perms = biomarkers_int[perm_idx]
+
+#         # Create jagged sequences with required lengths; recycle lengths if needed
+#         # (so batch can exceed remaining)
+#         k = min(batch, n_target - len(collected))
+#         target_lengths = lengths[len(collected):len(collected)+k]
+
+#         # Try a bit more than k to offset collisions
+#         # (take first 2k candidates, slice to each target length)
+#         take = min(perms.shape[0], 2*k)
+#         candidates = [perms[i, :target_lengths[min(i, k-1)]] for i in range(take)]
+
+#         for seq in candidates:
+#             t = tuple(seq.tolist())
+#             if t not in seen:
+#                 seen.add(t)
+#                 collected.append(seq)
+#                 if len(collected) == n_target:
+#                     break
+
+#     # Pad and return
+#     return _pad_rows(collected, pad_value=-1)
+
+# # ----------------------------
+# # 4) Combined order — unchanged API (your samplers do the work)
+# # ----------------------------
+# def get_combined_order(
+#     padded_partial_orders: np.ndarray,
+#     rng: np.random.Generator,
+#     method: str,
+#     mcmc_iterations: int,
+#     pl_best: bool,
+#     mallows_temperature: float
+# ) -> np.ndarray:
+#     if method == 'PL':
+#         sampler = PlackettLuce(ordering_array=padded_partial_orders, rng=rng, pl_best=pl_best)
+#     else:
+#         sampler = MCMC(
+#             ordering_array=padded_partial_orders,
+#             rng=rng,
+#             method=method,
+#             mcmc_iterations=mcmc_iterations,
+#             mallows_temperature=mallows_temperature
+#         )
+#     return sampler.sample_one()
+
+# def get_final_params(
+#     params: Dict[str, Dict[str, float]],
+#     combined_ordering: np.ndarray,
+#     ordering_array,  # can be List[np.ndarray] or a 2-D np.ndarray with -1 padding
+#     int2str: Dict[int, str],
+#     rng: np.random.Generator,
+# ) -> Dict[str, Dict[str, float]]:
+#     # Flatten and drop padding (-1)
+#     if isinstance(ordering_array, np.ndarray):
+#         flat = ordering_array.ravel()
+#     else:
+#         flat = np.concatenate([np.asarray(x, dtype=int, order='C') for x in ordering_array]) \
+#                if ordering_array else np.empty((0,), dtype=int)
+
+#     if flat.size:
+#         flat = flat[flat >= 0]  # remove -1 padding
+
+#     if flat.size:
+#         max_idx = int(flat.max())
+#         freq = np.bincount(flat, minlength=max_idx + 1)
+#         def get_freq(x: int) -> int:
+#             return int(freq[x]) if 0 <= x <= max_idx else 0
+#     else:
+#         def get_freq(x: int) -> int:
+#             return 0
+
+#     final_params: Dict[str, Dict[str, float]] = {}
+#     for bm_int in combined_ordering:
+#         if bm_int in int2str:  # automatically skips -1 and unknowns
+#             bm = int2str[bm_int]
+#             out = params[bm].copy()
+#             if get_freq(bm_int) > 1:
+#                 vals = rng.uniform(-0.95, 0.95, size=2)
+#                 out['theta_mean'] = out['theta_mean'] + out['theta_mean'] * vals[0]
+#                 out['theta_std']  = out['theta_std']  + out['theta_std']  * vals[1]
+#             final_params[bm] = out
+#     return final_params
+
 
 def get_partial_orders(
         n_partial_rankings: int,
@@ -131,7 +224,7 @@ def get_padded_partial_orders(
     """
     n_partial_rankings = rng.integers(low_num, high_num + 1)
     # partial ranking length does not have to be unique, so replace=True
-    lengths = rng.choice(np.arange(low_length, high_length), size=n_partial_rankings, replace=True)
+    lengths = rng.choice(np.arange(low_length, high_length + 1), size=n_partial_rankings, replace=True)
     n_unique = 0
     # to make sure no two partial orderings are the same
     while n_unique != n_partial_rankings: 
@@ -147,23 +240,23 @@ def get_combined_order(
         method:str,
         mcmc_iterations:int,
         pl_best:bool,
+        mallows_temperature:float
     ) -> np.ndarray:
 
     # get combined ordering
-    if method != 'PL':
-        mpebm_mcmc_sampler = MCMC(ordering_array=padded_partial_orders, rng=rng, method=method, mcmc_iterations=mcmc_iterations)
-        combined_order = mpebm_mcmc_sampler.sample_one()
+    if method == 'PL':
+        sampler = PlackettLuce(ordering_array=padded_partial_orders, rng=rng, pl_best=pl_best)
     else:
-        pl_sampler = PlackettLuce(ordering_array=padded_partial_orders, rng=rng, pl_best=pl_best)
-        combined_order = pl_sampler.sample_one()
+        sampler = MCMC(ordering_array=padded_partial_orders, rng=rng, method=method, mcmc_iterations=mcmc_iterations, mallows_temperature=mallows_temperature)
 
-    return combined_order
+    return sampler.sample_one()
 
 def get_final_params(
         params:Dict[str, Dict[str, float]], 
         combined_ordering:np.ndarray, 
         ordering_array:np.ndarray,
-        int2str:Dict[int, str]
+        int2str:Dict[int, str],
+        rng:np.random.Generator,
     ) -> Dict[str, Dict[str, float]]:
     """
     1. use the combined ordering
@@ -179,15 +272,16 @@ def get_final_params(
             bm = int2str[bm_int]
             final_params[bm] = params[bm].copy()
             if frequency_dict[bm_int] > 1:
-                final_params[bm]['theta_mean'] /= 0.9 
-                final_params[bm]['theta_std'] /= 1.2
+                vals = rng.uniform(-0.95, 0.95, size=2)
+                final_params[bm]['theta_mean'] += final_params[bm]['theta_mean'] * vals[0]
+                final_params[bm]['theta_std'] += final_params[bm]['theta_std'] * vals[1]
     return final_params
 
-@njit
-def pl_neg_log_likelihood_numba(ordering_array, theta):
+@njit(fastmath=False, parallel=False)
+def pl_neg_log_likelihood_numba(ordering_array, alphas):
     """
     ordering_array: list/array of int64 arrays (0-based IDs into theta)
-    theta: 1D float64 array of length n_unique_elements
+    alphas: 1D float64 array of length n_unique_elements
 
     We are multiplying all the total likelihood of each partial ordering
     but since we are using log, we add them up
@@ -195,21 +289,22 @@ def pl_neg_log_likelihood_numba(ordering_array, theta):
     """
     total = 0.0
     for ordering_idx in ordering_array:
-        logits = theta[ordering_idx]
+        partial_alphas = alphas[ordering_idx] # alphas for this current partial rank (as partial ranks may be incomplete)
         n = len(ordering_idx)
         for i in range(n):
-            sub_logits = logits[i:]
-            max_logit = np.max(sub_logits)
-            log_denom = max_logit + np.log(np.sum(np.exp(sub_logits - max_logit)))
-            total += logits[i] - log_denom
+            # alphas in the denominator of the energy forumla
+            sub_alphas = partial_alphas[i:] # alphas are the raw theta/alpha values
+            max_alpha = np.max(sub_alphas)
+            log_denom = max_alpha + np.log(np.sum(np.exp(sub_alphas - max_alpha)))
+            total += partial_alphas[i] - log_denom
     return -total
 
-@njit
-def pl_energy_numba(ordering, unique_elements, theta):
+@njit(fastmath=False, parallel=False)
+def pl_energy_numba(ordering, unique_elements, alphas):
     """
     ordering: ID int64 array of IDs
     unique_elements: the sorted array of unique elements from PL class
-    theta: 1D float64 array
+    alphsa: 1D float64 array
     Returns: scalar energy
     """
     n = len(ordering)
@@ -225,43 +320,26 @@ def pl_energy_numba(ordering, unique_elements, theta):
     total_energy = 0.0 
     n = len(ordering_idx)
     for i in range(n):
-        logits = theta[ordering_idx[i:]]
-        max_logit = np.max(logits)
-        log_denom = max_logit + np.log(np.sum(np.exp(logits - max_logit)))
-        total_energy += -(theta[ordering_idx[i]] - log_denom)
+        sub_alphas = alphas[ordering_idx[i:]]
+        max_alpha = np.max(sub_alphas)
+        log_denom = max_alpha + np.log(np.sum(np.exp(sub_alphas - max_alpha)))
+        total_energy += -(alphas[ordering_idx[i]] - log_denom)
     return total_energy
 
-def pl_sample_one_random(n:int, unique_elements:np.ndarray, theta:np.ndarray, rng:np.random.Generator) -> np.ndarray:
-    """Sample a single complete ordering (integer indices into theta)."""
-    # n = len(unique_elements)
-    res = np.empty(n, dtype=unique_elements.dtype)
+def pl_sample_one_random(unique_elements, theta, rng):
+    """
+    Sample one Plackett–Luce ranking.
 
-    remaining_items = unique_elements.copy()
-    remaining_idx = np.arange(n, dtype=np.int64)
-    remaining_len = n 
+    unique_elements : array-like of labels (ints, strs, etc.)
+    theta           : array of log-worths (same length as unique_elements)
+    rng             : np.random.Generator
 
-    for pos in range(n):
-        # this is the indice of each bm in remaining according to the original unique_elements
-        logits = theta[remaining_idx[:remaining_len]]
-        max_logit = np.max(logits)
-        probs = np.exp(logits - max_logit)
-        probs /= np.sum(probs)
-
-        chosen_index = rng.choice(remaining_len, p=probs)
-        # update res 
-        res[pos] = remaining_items[chosen_index]
-        # swap+slice deletion
-        remaining_idx[chosen_index], remaining_idx[remaining_len - 1] = (
-            remaining_idx[remaining_len - 1],
-            remaining_idx[chosen_index],
-        )
-        remaining_items[chosen_index], remaining_items[remaining_len - 1] = (
-            remaining_items[remaining_len - 1],
-            remaining_items[chosen_index],
-        )
-        remaining_len -= 1
-
-    return res
+    Gumbel Max Property: if we add Gumbel(0,1) noise to log-worths theta_i,
+    the probability that item i has the maximum score is exactly e^theta_i/sum_j e^theta_j
+    """
+    scores = theta + rng.gumbel(size=theta.shape)
+    order = np.argsort(-scores)             # indices in descending order
+    return unique_elements[order]           # labels in PL order
 
 def pl_sample_one_best(
         unique_elements:np.ndarray,
@@ -294,7 +372,7 @@ def pl_sample_one_best(
             prob_accept = min(1.0, np.exp(delta_energy))
 
         # Accept the new ordering with probability α
-        if np.random.random() < prob_accept:
+        if rng.random() < prob_accept:
             current_order=new_order
             current_energy=new_energy
         
@@ -309,21 +387,25 @@ class PlackettLuce:
             self, 
             ordering_array:np.ndarray,
             rng: np.random.Generator, 
-            sample_count:int=200, 
+            sample_count:int=500, 
             mcmc_iterations:int=500,
             n_shuffle:int=2,
-            pl_best:bool=True
+            pl_best:bool=True,
+            n_random_perms:int=1_0000 # how many random permutations to use for alignment computation
             ):
         """
         ordering_array: padded array of array (integers, arbitrary IDs);  padded with -1
         rng: np.random.Generator
         """
         self.rng = rng 
+        self.aggrank_dependence = None
         # how many to sample for conflict and certainty calculation
         self.sample_count = sample_count 
         self.mcmc_iterations = mcmc_iterations
         self.n_shuffle = n_shuffle
         self.pl_best = pl_best
+        self.ordering_array = ordering_array
+        self.n_random_perms = n_random_perms
 
         # Step 1: Find all unique elements and sort
         # pass over -1
@@ -348,6 +430,7 @@ class PlackettLuce:
         # Step 4: Initialize theta and sampled orderings 
         self.theta = np.zeros(self.n_unique_elements, dtype=np.float64)
         self.sampled_combined_orderings = np.zeros((sample_count, self.n_unique_elements), dtype=np.int64)
+        self.sampled_energies = np.zeros(sample_count, dtype=np.float64)
 
         # Step 5: Fit theta
         self.estimate_pl_theta()
@@ -365,7 +448,7 @@ class PlackettLuce:
             print("Warning: optimization failed:", result.message)
         self.theta = result.x
     
-    def pl_energy(self, ordering):
+    def get_energy(self, ordering):
         """
         ordering: array of real biomarker IDs (same domain as unique_elements)
         Returns: scalar energy
@@ -376,7 +459,7 @@ class PlackettLuce:
 
     def sample_one_random(self) -> np.ndarray:
         """Sample a single complete ordering (integer indices into theta)."""
-        return pl_sample_one_random(self.n_unique_elements, self.unique_elements, self.theta, self.rng)
+        return pl_sample_one_random(self.unique_elements, self.theta, self.rng)
     
     def sample_one_best(self) -> np.ndarray:
         current_order = self.sample_one_random()
@@ -395,18 +478,45 @@ class PlackettLuce:
             return self.sample_one_best()
         else:
             return self.sample_one_random()
-
+        
     def get_sampled_combined_orderings(self):
         for idx in range(self.sample_count):
-            self.sampled_combined_orderings[idx] = self.sample_one()
-       
-    def compute_certainty(self) -> float:
+            order = self.sample_one().astype(np.int64)
+            if order.shape != (self.n_unique_elements,):
+                raise ValueError(f"Unexpected sample shape {order.shape}")
+            self.sampled_combined_orderings[idx, :] = order
+            self.sampled_energies[idx] = self.get_energy(order)
+    
+    def compute_alignment_and_determinism(self):
+        # those sampled are using the original random IDs, not indices
         if np.sum(self.sampled_combined_orderings[0]) == 0:
             self.get_sampled_combined_orderings()
-        rank_matrix = rankings_to_matrix(self.sampled_combined_orderings)
-        return kendalls_w(rank_matrix)
 
-@njit 
+        # Calculate aggrank_agreement: how stable is the full ranking generation
+        rank_matrix = rankings_to_matrix(self.sampled_combined_orderings)
+        self.aggrank_agreement = kendalls_w(rank_matrix)
+
+        # check model validity (that random perms with lower energies should be closer to sampled perms/full rankings)
+        # those are IDs
+        random_perms = np.array([self.rng.permutation(self.unique_elements) for _ in range(self.n_random_perms)])
+        self.random_perms = random_perms 
+
+        self.random_perm_energies = np.zeros(len(random_perms), dtype=np.float64)
+        for i, random_perm in enumerate(random_perms):
+            self.random_perm_energies[i] = self.get_energy(random_perm)
+
+        self.aggrank_dependence = auroc_from_energies(y=self.sampled_energies, x=self.random_perm_energies)
+       
+    def check_model_validity(self):
+        # need to have random_perms and sampled_combined_orderings first
+        if self.aggrank_dependence is None:
+            self.compute_alignment_and_determinism()
+        # the tau array. taus[i] is the average tau beween random_perms[i] and self.sampled_combined_orderings
+        self.random_perm_taus, _ = get_average_tau(self.random_perms, self.sampled_combined_orderings)
+        # Spearman correlation
+        self.spearman_rho, self.spearman_p = spearmanr(self.random_perm_taus, self.random_perm_energies)
+
+@njit(fastmath=False, parallel=False) 
 def compute_conflict2(ordering_array:np.ndarray) -> float:
     """
     Args:
@@ -478,7 +588,7 @@ def shuffle_order(arr: np.ndarray, n_shuffle: int, rng:np.random.Generator) -> i
             break
     arr[indices]=arr[shuffled_indices]
 
-@njit 
+@njit(fastmath=False, parallel=False) 
 def pairwise_energy_numba(ordering, weights_dict_keys, weights_dict_values) -> float:
         """
         Calculates the energy E(σ) of a given ordering.
@@ -509,7 +619,7 @@ def pairwise_energy_numba(ordering, weights_dict_keys, weights_dict_values) -> f
                         break 
         return -total_sum
 
-@njit 
+@njit(fastmath=False, parallel=False) 
 def bt_energy_numba(ordering, theta_keys, theta_values) -> float:
     """
     Calculate Bradley-Terry energy.
@@ -542,7 +652,7 @@ def bt_energy_numba(ordering, theta_keys, theta_values) -> float:
             total_energy += -np.log(max(prob_ij, 1e-16))
     return total_energy
 
-@njit
+@njit(fastmath=False, parallel=False)
 def normalized_kendalls_tau_distance(r1:np.ndarray, r2:np.ndarray) -> float:
     """ 
     Args:
@@ -559,7 +669,7 @@ def normalized_kendalls_tau_distance(r1:np.ndarray, r2:np.ndarray) -> float:
     total = concordant + discordant
     return discordant / total if total > 0 else 0.0
 
-@njit 
+@njit(fastmath=False, parallel=False) 
 def normalized_rmj_distance(central:np.ndarray, ranking:np.ndarray) -> float:
     n = len(central)
     max_id = np.max(central) 
@@ -576,8 +686,8 @@ def normalized_rmj_distance(central:np.ndarray, ranking:np.ndarray) -> float:
     max_distance = n * (n-1) / 2
     return distance / max_distance if max_distance > 0 else 0.0 
 
-@njit 
-def mallows_energy_numba(ordering:np.ndarray, central_ordering:np.ndarray, dist_metric:str) -> float:
+@njit(fastmath=False, parallel=False) 
+def mallows_energy_numba(ordering:np.ndarray, central_ordering:np.ndarray, dist_metric:str, mallows_temperature:float) -> float:
     """Calculate the energy of ordering using mallows
     Args:
         ordering: np.ndarray, an 1D array of IDs
@@ -589,51 +699,9 @@ def mallows_energy_numba(ordering:np.ndarray, central_ordering:np.ndarray, dist_
         r1 = np.argsort(ordering)
         r2 = np.argsort(central_ordering)
 
-        return normalized_kendalls_tau_distance(r1, r2)
+        return mallows_temperature * normalized_kendalls_tau_distance(r1, r2, )
     else:
-        return normalized_rmj_distance(central=central_ordering, ranking=ordering)
-
-# @njit 
-# def mallows_energy_numba(ordering:np.ndarray, ordering_array:np.ndarray, dist_metric:str) -> float:
-#     """Calculate the energy of ordering using mallows
-#     Args:
-#         ordering: np.ndarray, an 1D array of IDs
-#         ordering_array: NumbaLists of NumbaList
-#     """
-#     total_distance = 0.0 
-#     for partial_ordering in ordering_array:
-
-#         # find common 
-#         common_items = NumbaList()
-#         for item in partial_ordering:
-#             if item != -1 and item in ordering:
-#                 common_items.append(item)
-#         if len(common_items) < 2:
-#             continue 
-
-#         r1 = np.empty(len(common_items), dtype=np.int64)
-#         r2 = np.empty(len(common_items), dtype=np.int64)
-
-#         idx = 0 
-#         for item in partial_ordering:
-#             if item in common_items:
-#                 r1[idx] = item 
-#                 idx += 1
-#         idx = 0
-#         for item in ordering:
-#             if item in common_items:
-#                 r2[idx] = item 
-#                 idx += 1
-
-#         if dist_metric == 'tau':
-#             # get the index of the common items 
-#             r1 = np.argsort(r1)
-#             r2 = np.argsort(r2)
-
-#             total_distance += normalized_kendalls_tau_distance(r1, r2)
-#         else:
-#             total_distance += normalized_rmj_distance(central=r1, ranking=r2)
-#     return total_distance
+        return mallows_temperature * normalized_rmj_distance(central=central_ordering, ranking=ordering)
 
 def mcmc_sample(
         initial_ordering,
@@ -643,7 +711,7 @@ def mcmc_sample(
         weights_keys, weights_values,
         theta_keys, theta_values,
         central_ranking,
-        temperature,
+        mallows_temperature, 
         rng
 ) -> np.ndarray:
     """
@@ -659,9 +727,9 @@ def mcmc_sample(
     if method == 0: # Pairwise
         current_energy= pairwise_energy_numba(current_order, weights_keys, weights_values)
     elif method == 1: # Mallows_Tau
-        current_energy= mallows_energy_numba(current_order, central_ranking, dist_metric='tau')
+        current_energy= mallows_energy_numba(current_order, central_ranking, dist_metric='tau', mallows_temperature=mallows_temperature)
     elif method == 2: # Mallows_RMJ
-        current_energy = mallows_energy_numba(current_order, central_ranking, dist_metric='rmj')
+        current_energy = mallows_energy_numba(current_order, central_ranking, dist_metric='rmj', mallows_temperature=mallows_temperature)
     else: # BT
         current_energy = bt_energy_numba(current_order, theta_keys, theta_values)
 
@@ -677,9 +745,9 @@ def mcmc_sample(
         if method == 0: # Pairwise
             new_energy= pairwise_energy_numba(new_order, weights_keys, weights_values)
         elif method == 1: # Mallows_Tau
-            new_energy= mallows_energy_numba(new_order, central_ranking, dist_metric='tau')
+            new_energy= mallows_energy_numba(new_order, central_ranking, dist_metric='tau', mallows_temperature=mallows_temperature)
         elif method == 2: # Mallows_RMJ
-            new_energy= mallows_energy_numba(new_order, central_ranking, dist_metric='rmj')
+            new_energy= mallows_energy_numba(new_order, central_ranking, dist_metric='rmj', mallows_temperature=mallows_temperature)
         else: # BT
             new_energy = bt_energy_numba(new_order, theta_keys, theta_values)
 
@@ -689,10 +757,7 @@ def mcmc_sample(
         if delta_energy > 700:  # Safe threshold for float64
             prob_accept = 1.0
         else:
-            if method == 1 or method == 2:
-                prob_accept = min(1.0, np.exp(temperature * delta_energy))
-            else:
-                prob_accept = min(1.0, np.exp(delta_energy))
+            prob_accept = min(1.0, np.exp(delta_energy))
 
         # Accept the new ordering with probability α
         if rng.random() < prob_accept:
@@ -704,6 +769,121 @@ def mcmc_sample(
             best_energy = current_energy
 
     return best_order 
+
+@njit(fastmath=False, parallel=False)
+def get_average_tau(perms_a: np.ndarray, perms_b: np.ndarray) -> Tuple[np.ndarray, float]:
+    """
+    Compute average normalized Kendall's tau distance between two sets of permutations.
+
+    Returns:
+        inner_taus: inner_taus[i] = average distance between perms_a[i] and all perms_b
+        avg_tau: mean(inner_taus)
+    """
+    # Assumes perms_a and perms_b are 2D (n_perms, n_items) int64 arrays of permutations.
+    nA = perms_a.shape[0]
+    nB = perms_b.shape[0]
+    inner_taus = np.zeros(nA, dtype=np.float64)
+
+    for i in range(nA):
+        perm_a = perms_a[i]
+        order_a = np.argsort(perm_a) 
+        s = 0.0
+        for j in range(nB):
+            perm_b = perms_b[j]
+            order_b = np.argsort(perm_b)
+            s += normalized_kendalls_tau_distance(order_a, order_b)
+        inner_taus[i] = s / nB
+
+    avg_tau = np.mean(inner_taus)
+    return inner_taus, avg_tau
+
+@njit(fastmath=False, parallel=False)
+# @njit(parallel=True)
+def alignment_metric(algo_energies, random_energies):
+    if len(algo_energies) == 0:
+        return 0.0
+    max_algo = np.max(algo_energies)
+    n_random = len(random_energies)
+    count_above = 0
+    for idx in range(n_random):   
+        count_above += random_energies[idx] > max_algo
+    return count_above / n_random
+
+def _rankdata_average(x: np.ndarray) -> np.ndarray:
+    """
+    Average (tie-aware) ranks, 1..n. Stable (mergesort) to keep groups contiguous.
+    """
+    x = np.asarray(x)
+    order = np.argsort(x, kind="mergesort")
+    ranks = np.empty_like(x, dtype=float)
+    xs = x[order]
+    n = len(x)
+    i = 0
+    while i < n:
+        j = i
+        while j + 1 < n and xs[j + 1] == xs[i]:
+            j += 1
+        avg = (i + j) / 2.0 + 1.0
+        ranks[order[i:j + 1]] = avg
+        i = j + 1
+    return ranks
+
+@njit(fastmath=False, parallel=False)
+def auroc_from_energies(x: np.ndarray, y: np.ndarray, x_is_positive:bool=True) -> float:
+    """
+    Compute AUROC using Mann-Whitney U statistic.
+
+    x should be random_energies; y should be algo_energies
+    
+    Args:
+        x, y: 1D numpy arrays of sample values
+        x_is_positive: If True, x represents positive class scores
+    
+    Returns:
+        AUROC value between 0 and 1
+    """
+    n1 = len(x)
+    n2 = len(y)
+    combined = np.empty(n1 + n2, dtype=np.float64)
+    labels = np.empty(n1 + n2, dtype=np.int64)
+
+    # Fill combined array
+    for i in range(n1):
+        combined[i] = x[i]
+        labels[i] = 0
+    for j in range(n2):
+        combined[n1 + j] = y[j]
+        labels[n1 + j] = 1
+
+    # argsort
+    order = np.argsort(combined)
+    ranks = np.empty_like(order, dtype=np.float64)
+
+    # Assign average ranks (handle ties manually)
+    i = 0
+    while i < len(order):
+        j = i + 1
+        while j < len(order) and combined[order[j]] == combined[order[i]]:
+            j += 1
+        avg_rank = 0.5 * (i + j - 1) + 1  # +1 for rank starting at 1
+        for k in range(i, j):
+            ranks[order[k]] = avg_rank
+        i = j
+
+    # Sum of ranks for sample x
+    R1 = 0.0
+    for i in range(n1 + n2):
+        if labels[i] == 0:
+            R1 += ranks[i]
+
+    # Compute U statistics
+    U1 = R1 - n1 * (n1 + 1) / 2.0 # U for sample x
+    U2 = n1 * n2 - U1 # U for sample y
+    if x_is_positive:
+        auroc = U1/(n1 * n2)
+    else:
+        auroc = U2/ (n1 * n2)
+    return auroc 
 
 class MCMC:
     """
@@ -720,8 +900,9 @@ class MCMC:
             n_shuffle: int=2,
             rng: np.random.Generator=None,
             method: str='Mallows',
-            sample_count:int=200,
-            temperature = 100,
+            sample_count:int=500,
+            mallows_temperature = 1,
+            n_random_perms:int=1_0000, 
         ):
         """
         Initializes the MCMC sampler.
@@ -735,16 +916,20 @@ class MCMC:
         """
         # 1. Calculate the preference weights from the input data.
         self.method=method
+        self.aggrank_dependence = None 
+        self.n_random_perms = n_random_perms
         self.ordering_array =ordering_array
         self.iterations = mcmc_iterations
         self.n_shuffle = n_shuffle 
         self.sample_count = sample_count 
-        self.temperature = temperature
+        self.mallows_temperature = mallows_temperature
+        self.central_ranking = None
         self.rng = rng 
         if method == 'Mallows_Tau':
             self.dist_metric = 'tau'
         if method == 'Mallows_RMJ':
             self.dist_metric = 'rmj'
+
         # Get unique elements 
         self.unique_elements = np.unique(
             np.concatenate([
@@ -755,13 +940,14 @@ class MCMC:
         self.n_items = len(self.unique_elements)
 
         self.sampled_combined_orderings = np.zeros((sample_count, self.n_items), dtype=np.int64)
+        self.sampled_energies = np.zeros(sample_count, dtype=np.float64)
 
         if 'Mallows' in method:
             ori_method = method
             self.method = 'BT'
             self._prepare_method_data()
             self.central_ranking = self.sample_one()
-            self.method = ori_method
+            self.method = ori_method # change back to Mallows method
 
         self._prepare_method_data()
 
@@ -842,15 +1028,24 @@ class MCMC:
         )
         # Return dictionary mapping item IDs to theta values
         return {item: result.x[idx] for item, idx in items_idx.items()}
-    
-    def bt_energy(self, ordering:np.ndarray) -> float:
-        return bt_energy_numba(ordering, self.theta_keys, self.theta_values)
-    
-    def pairwise_energy(self, ordering:np.ndarray) -> float:
-        return pairwise_energy_numba(ordering, self.weights_keys, self.weights_values)
-    
-    def mallows_energy(self, ordering:np.ndarray) -> float:
-        return mallows_energy_numba(ordering, self.central_ranking, self.dist_metric)
+
+    def get_energy(self, ordering:np.ndarray) -> float:
+        
+        if 'Mallows' in self.method and self.central_ranking is None:
+            # initialize central ranking if not already set
+            ori_method = self.method
+            self.method = 'BT'
+            self._prepare_method_data()
+            self.central_ranking = self.sample_one()
+            self.method = ori_method # change back to Mallows method
+        if self.method == 'BT':
+            return bt_energy_numba(ordering, self.theta_keys, self.theta_values)
+        elif self.method == 'Pairwise':
+            return pairwise_energy_numba(ordering, self.weights_keys, self.weights_values)
+        elif self.method == 'Mallows_Tau' or self.method == 'Mallows_RMJ':
+            return mallows_energy_numba(ordering, self.central_ranking, self.dist_metric, self.mallows_temperature)
+        else:
+            raise ValueError(f"Unknown method {self.method}")
     
     def sample_one(self) -> np.ndarray:
         """Sample one ordering using numba-optimized MCMC"""
@@ -890,7 +1085,7 @@ class MCMC:
             weights_keys, weights_values,
             theta_keys, theta_values,
             central_ranking,
-            self.temperature,
+            self.mallows_temperature,
             self.rng
         )
         return result
@@ -898,9 +1093,42 @@ class MCMC:
     def get_sampled_combined_orderings(self):
         """Generate multiple samples"""
         for idx in range(self.sample_count):
-            self.sampled_combined_orderings[idx] = self.sample_one()
-    
-    def compute_certainty(self) -> float:
-        self.get_sampled_combined_orderings()
+            order = self.sample_one()
+            self.sampled_combined_orderings[idx, :] = order
+            self.sampled_energies[idx] = self.get_energy(order)
+
+    def compute_alignment_and_determinism(self):
+        # those sampled are using the original random IDs, not indices
+        if np.sum(self.sampled_combined_orderings[0]) == 0:
+            self.get_sampled_combined_orderings()
+
+        # Calculate aggrank_agreement: how stable is the full ranking generation
         rank_matrix = rankings_to_matrix(self.sampled_combined_orderings)
-        return kendalls_w(rank_matrix)
+        self.aggrank_agreement = kendalls_w(rank_matrix)
+
+        # check model validity (that random perms with lower energies should be closer to sampled perms/full rankings)
+        random_perms = np.array([self.rng.permutation(self.unique_elements) for _ in range(self.n_random_perms)])
+        self.random_perms = random_perms 
+
+        # calculate random perm energies
+        # we need to redo central ranking sampling. this is because in real mh, you won't know the
+        # central ranking we used to get sampled combined orderings
+        ori_method = self.method
+        self.method = 'BT'
+        self._prepare_method_data()
+        self.central_ranking = self.sample_one()
+        self.method = ori_method # change back to Mallows method
+
+        self.random_perm_energies = np.zeros(len(random_perms), dtype=np.float64)
+        for i, random_perm in enumerate(random_perms):
+            self.random_perm_energies[i] = self.get_energy(random_perm)
+        
+        self.aggrank_dependence = auroc_from_energies(y=self.sampled_energies, x=self.random_perm_energies)
+
+    def check_model_validity(self):
+        # need to have random_perms and sampled_combined_orderings first
+        if self.aggrank_dependence is None:
+            self.compute_alignment_and_determinism()
+        # the tau array. taus[i] is the average tau beween random_perms[i] and self.sampled_combined_orderings
+        self.random_perm_taus, _ = get_average_tau(self.random_perms, self.sampled_combined_orderings)
+        self.spearman_rho, self.spearman_p = spearmanr(self.random_perm_taus, self.random_perm_energies)

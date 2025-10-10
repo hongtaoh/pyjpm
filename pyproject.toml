@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pympebm"
-version = "0.4.19"
+version = "0.8.6"
 description = "Mixed-Pathology Event-Based Modeling for Disease Progression"
 readme = "README.md"
 authors = [
@@ -23,7 +23,8 @@ dependencies = [
  "matplotlib",
  "seaborn",
  "scikit-learn",
- "numba"
+ "numba",
+ "pysaebm"
 ]
 
 [project.urls]

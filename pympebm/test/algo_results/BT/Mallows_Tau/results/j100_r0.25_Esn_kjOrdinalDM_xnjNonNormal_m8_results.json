@@ -1,0 +1,17 @@
+{
+    "runtime": 1.4015228748321533,
+    "max_log_likelihood": -37.91698646207434,
+    "kendalls_tau": 0.16666666666666669,
+    "mean_absolute_error": 1.2,
+    "order_with_highest_ll": {
+        "ADAS13": 2,
+        "EntorhinalNorm": 6,
+        "FAQ": 5,
+        "FDG": 8,
+        "FusiformNorm": 4,
+        "HippocampusNorm": 7,
+        "LDELTOTAL": 3,
+        "PTAU": 9,
+        "RAVLT_immediate": 1
+    }
+}

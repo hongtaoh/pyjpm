@@ -91,3 +91,60 @@ To run `gen.py` first. Then to generate partial ordering datasets. `gen_partial.
     - Reuse params inferred from individual diseases.
     - Used biomarkers and theta/phi params obtained from NACC data analysis.
 
+- 2025-08-20 (v 0.5.1)
+    - Used biomarkers and their theta/phi from both ADNI only.
+    - Changed `'random'` to `'Random'` in `generate_data.py`.
+    - Randomly choose two floats for new theta params for overlapping biomarkers.
+
+- 2025-08-21 (V 0.5.4)
+    - Try only 12 biomarkers for params.
+    - Try 18 biomarkers for params.
+    - Add rnadom pertubations to overlapped biomarkers params. 
+
+- 2025-08-22 (V 0.5.6)
+    - Try scaling factor for energy in `mh.py`
+
+- 2025-08-23 (V 0.5.9)
+    - Test differetn energy influence.
+    - `use_scaling`
+ 
+- 205-08-25 (V 0.6.0)
+   - Test `percentile`.
+  
+- 205-08-26 (V 0.6.2)
+  - Added analysis about `alignment` and `effect_size`. 
+
+
+- 2025-08-27 (V 0.6.7)
+  - Added `energy_prior` and `model_prior`. 
+  - Mapped `energy_prior` to `mallows_temperature`.
+
+- 2025-08-28 (V 0.6.9)
+  - Removed `energy_prior`. Only use model `calibration`. 
+
+- 2025-08-32 (V 0.7.3)
+  - Modified the data generation just like in subtypes. 
+
+- 2025-09-01 (V 0.7.4)
+  - Removed the forcing range of `event times`. 
+
+- 2025-09-03 (V 0.7.5)
+  - Added `save_data` boolen to `generate_data.py`. 
+
+- 2025-09-04 (V 0.8.0)
+  - Removed `calibration`. We cannot use it. 
+  - Aligned with how i get staging with `pysaebm`: completely blind, not even using healthy ratio and the learned stage prior. Only use the theta/phi.
+  - Modified what to return in `run.py`.
+
+- 2025-09-09 (V 0.8.1)
+  - Added plots back.
+  
+- 2025-09-21 (V 0.8.2)
+    - Removed `iteration >= burn_in` when updating best_*. 
+  
+- 2025-10-08 (V 0.8.4)
+    - Used soft counts for conjugate prior updates. 
+  
+- 2025-10-09 (V 0.8.6)
+    - Update the non-normal distribution parameters. 
+  

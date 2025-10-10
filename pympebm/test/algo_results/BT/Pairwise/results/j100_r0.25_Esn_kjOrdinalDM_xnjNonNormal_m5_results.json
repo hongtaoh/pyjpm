@@ -1,0 +1,25 @@
+{
+    "runtime": 2.4392309188842773,
+    "max_log_likelihood": -1345.7795289766893,
+    "kendalls_tau": 0.2720588235294118,
+    "mean_absolute_error": 2.73,
+    "order_with_highest_ll": {
+        "ABETA": 5,
+        "ADAS13": 8,
+        "CDRSB": 14,
+        "EntorhinalNorm": 4,
+        "FAQ": 13,
+        "FusiformNorm": 11,
+        "HippocampusNorm": 3,
+        "LDELTOTAL": 12,
+        "MMSE": 10,
+        "MOCA": 7,
+        "MidTempNorm": 6,
+        "PTAU": 2,
+        "RAVLT_immediate": 1,
+        "TAU": 16,
+        "TRABSCOR": 15,
+        "VentricleNorm": 9,
+        "WholeBrainNorm": 17
+    }
+}
