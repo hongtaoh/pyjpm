@@ -1,4 +1,4 @@
-from pympebm import generate, get_params_path
+from pyjpm import generate, get_params_path
 import numpy as np 
 import json 
 import re 

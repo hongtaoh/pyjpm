@@ -1,8 +1,8 @@
 import numpy as np
-import pympebm.utils as utils 
+import pyjpm.utils as utils 
 from typing import Tuple, List
 import logging
-import pympebm.mp_utils as mp_utils
+import pyjpm.mp_utils as mp_utils
 
 def metropolis_hastings(
         partial_rankings: np.ndarray,
@@ -28,8 +28,6 @@ def metropolis_hastings(
         allowed_mp_method = {'PL', 'Mallows_Tau', 'Mallows_RMJ' ,'Pairwise', 'BT'}
         assert mp_method in allowed_mp_method, f'mp_method must be chosen from {allowed_mp_method}!'
         
-        calibration = {'Pairwise': 0.9, 'BT': 0.8, 'PL': 0.6, 'Mallows_Tau': 0.9}[mp_method]
-
         # no need to sample, so there is no need to use mcmc_iterations, sample_count, pl_best
         if mp_method == 'PL':
             sampler = mp_utils.PlackettLuce(ordering_array=partial_rankings, rng=rng)
@@ -71,21 +69,19 @@ def metropolis_hastings(
     # Notice that the index starts from zero here. 
     current_pi = rng.dirichlet(alpha_prior)
     # Only for diseased participants
-    current_stage_post = np.zeros((n_participants, n_disease_stages))
+    # current_stage_post = np.zeros((n_participants, n_disease_stages))
     acceptance_count = 0
-
-    # Note that this records only the current accepted orders in each iteration
-    all_accepted_orders = []
-    # This records all log likelihoods
-    log_likelihoods = []
 
     best_order = current_order.copy()
     best_theta_phi = current_theta_phi.copy()
     best_log_likelihood = current_ln_likelihood
 
+    all_accepted_orders = np.zeros((iterations, n_biomarkers), dtype=np.int64)
+    # This records all log likelihoods
+    log_likelihoods = np.zeros(iterations, dtype=np.float64)
+
     for iteration in range(iterations):
         random_state = rng.integers(0, 2**32 - 1)
-        log_likelihoods.append(current_ln_likelihood)
 
         new_order = current_order.copy()
         # utils.shuffle_adjacent(current_order, rng)
@@ -113,8 +109,6 @@ def metropolis_hastings(
         # Compute the new theta_phi_estimates based on new_order
         new_theta_phi = utils.update_theta_phi_estimates(
             n_biomarkers,
-            n_participants,
-            non_diseased_ids,
             data_matrix,
             new_order,
             current_theta_phi,  # Current state’s θ/φ
@@ -122,7 +116,6 @@ def metropolis_hastings(
             disease_stages,
             prior_n,    # Weak prior (not data-dependent)
             prior_v,     # Weak prior (not data-dependent)
-            random_state,
         )
 
         # Recompute new_ln_likelihood using the new theta_phi_estimates
@@ -132,7 +125,7 @@ def metropolis_hastings(
         new_energy = 0.0
         if len(partial_rankings) > 0:
             new_energy = sampler.get_energy(biomarkers_int[np.argsort(new_order)])
-            new_ln_likelihood -= new_energy * calibration
+            new_ln_likelihood -= new_energy
         # Compute acceptance probability
         delta = new_ln_likelihood - current_ln_likelihood
         prob_accept = 1.0 if delta > 0 else np.exp(delta)
@@ -141,18 +134,29 @@ def metropolis_hastings(
         if rng.random() < prob_accept:
             current_order = new_order
             current_ln_likelihood = new_ln_likelihood
-            current_stage_post = stage_post_new
+            # stage post exists only to update the stage prior (current_pi), so it's an intermediate variable
+            # current_stage_post = stage_post_new
             current_theta_phi = new_theta_phi
             acceptance_count += 1
 
-            stage_counts = np.zeros(n_disease_stages)
-            # participant, array of stage likelihoods
-            for p in range(n_participants):
-                stage_probs = stage_post_new[p]
-                stage_counts += stage_probs  # Soft counts
+            # for each column, get the sum of all rows; output is a vector of stage_post_new.shape[1]
+            stage_counts = stage_post_new[diseased_ids].sum(axis=0)  # soft counts
             current_pi = rng.dirichlet(alpha_prior + stage_counts)
 
-        all_accepted_orders.append(current_order.copy())
+            # stage_counts = np.zeros(n_disease_stages)
+            # # participant, array of stage likelihoods
+            # for p in range(n_participants):
+            #     stage_probs = stage_post_new[p]
+            #     stage_counts += stage_probs  # Soft counts
+            # current_pi = rng.dirichlet(alpha_prior + stage_counts)
+
+            if current_ln_likelihood > best_log_likelihood:
+                best_log_likelihood = current_ln_likelihood
+                best_order = current_order.copy()
+                best_theta_phi = current_theta_phi.copy()
+
+        all_accepted_orders[iteration] = current_order.copy()
+        log_likelihoods[iteration] = current_ln_likelihood
 
         # Log progress
         if (iteration + 1) % max(10, iterations // 10) == 0:
@@ -169,4 +173,4 @@ def metropolis_hastings(
             logging.info(msg)
 
 
-    return all_accepted_orders, log_likelihoods, current_theta_phi, current_stage_post, current_pi
+    return all_accepted_orders, log_likelihoods, best_order, best_log_likelihood, best_theta_phi

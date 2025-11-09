@@ -10,7 +10,7 @@ import sys
 from sklearn.metrics import mean_absolute_error
 import pysaebm.utils as utils
 from .mh import metropolis_hastings
-from pympebm.utils import convert_np_types
+from pyjpm.utils import convert_np_types
 from .viz import save_heatmap, save_traceplot
 
 

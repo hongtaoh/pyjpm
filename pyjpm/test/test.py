@@ -1,5 +1,5 @@
-from pympebm import run_mpebm, get_params_path
-from pympebm.mp_utils import get_unique_rows
+from pyjpm import run_mpebm, get_params_path
+from pyjpm.mp_utils import get_unique_rows
 import os
 import json 
 import re 
@@ -31,20 +31,18 @@ if __name__=='__main__':
 
     cwd = os.getcwd()
     print("Current Working Directory:", cwd)
-    for data_sub_dir in ['Mallows_Tau', 'BT', 'Random', 'PL', 'Pairwise']:
-        # energy_prior = {'Pairwise': 0.8, 'BT': 0.9, 'PL': 0.8, 'Mallows_Tau': 0.6, 'Random':0.001}[data_sub_dir]
-        data_dir = f"{cwd}/pympebm/test/my_data/{data_sub_dir}"
+    for data_sub_dir in ['BT']:
+        data_dir = f"{cwd}/pyjpm/test/my_data/{data_sub_dir}"
         data_files = os.listdir(data_dir) 
         data_files = [x for x in data_files if 'PR' not in x]
 
         OUTPUT_DIR = os.path.join('algo_results', data_sub_dir)
 
-        with open(f"{cwd}/pympebm/test/true_order_and_stages_{data_sub_dir}.json", "r") as f:
+        with open(f"{cwd}/pyjpm/test/true_order_and_stages_{data_sub_dir}.json", "r") as f:
             true_order_and_stages = json.load(f)
 
-        for data_file in data_files[:3]:
+        for data_file in data_files:
             estimated_partial_rankings = []
-            # final_theta_phi_list = []
 
             fname = data_file.replace('.csv', '')
             J, R, E, M = extract_components(fname)
@@ -55,20 +53,18 @@ if __name__=='__main__':
             n_partial_rankings = len(partial_rankings)
 
             for idx in range(n_partial_rankings):
-                # partial ranking data file path
                 pr_data_file = f"{data_dir}/PR{idx}_m{M}_j{int(J)*3}_r{R}_E{E}.csv"
 
                 random_state = rng.integers(0, 2**32 - 1)
                 best_order, order_with_highest_ll = run_mpebm(
                     data_file=pr_data_file,
                     save_results=False,
-                    n_iter=10000,
-                    burn_in=100,
+                    n_iter=400,
+                    burn_in=10,
                     seed = random_state
                 )
                 # Sort by value, the sorted result will be a list of tuples
                 partial_ordering_str = [k for k, v in sorted(order_with_highest_ll.items(), key=lambda item: item[1])]
-                # partial_ordering_str = [biomarkers_str[np.argsort(best_order)]]
                 partial_ordering = [str2int[bm] for bm in partial_ordering_str]
                 estimated_partial_rankings.append(partial_ordering)
 
@@ -83,14 +79,15 @@ if __name__=='__main__':
                     data_file= os.path.join(data_dir, data_file),
                     output_dir=OUTPUT_DIR,
                     output_folder=mp_method,
-                    n_iter=10000,
+                    n_iter=500,
                     n_shuffle=2,
-                    burn_in=200,
+                    burn_in=20,
                     thinning=1,
                     true_order_dict=true_order_dict,
                     true_stages = true_stages,
                     seed = random_state,
                     mallows_temperature=1,
+                    save_plots=True
                     )
             
             random_state = rng.integers(0, 2**32 - 1)
@@ -99,11 +96,12 @@ if __name__=='__main__':
                 data_file= os.path.join(data_dir, data_file),
                 output_dir=OUTPUT_DIR,
                 output_folder='saebm',
-                n_iter=10000,
+                n_iter=500,
                 n_shuffle=2,
-                burn_in=200,
+                burn_in=20,
                 thinning=1,
                 true_order_dict=true_order_dict,
                 true_stages = true_stages,
-                seed = random_state
+                seed = random_state,
+                save_plots=True
             )

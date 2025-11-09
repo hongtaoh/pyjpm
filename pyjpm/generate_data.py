@@ -1,12 +1,12 @@
 from typing import List, Optional, Tuple, Dict, Any
-from pympebm import mp_utils
+from pyjpm import mp_utils
 import json 
 import pandas as pd 
 import numpy as np 
 import os 
 from collections import defaultdict, Counter
 from bisect import bisect_right
-from pympebm import mp_utils
+from pyjpm import mp_utils
 
 # Rank continuous kjs
 def get_rank(sorted_et:np.ndarray, val:float):

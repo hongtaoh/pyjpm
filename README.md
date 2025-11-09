@@ -1,13 +1,10 @@
-# `pympebm`
-
+# `pyjpm`
 
 ## Installation
 
-
 ```bash
-pip install pympebm
+pip install pyjpm
 ```
-
 
 ## Data generation
 
@@ -147,4 +144,7 @@ To run `gen.py` first. Then to generate partial ordering datasets. `gen_partial.
   
 - 2025-10-09 (V 0.8.6)
     - Update the non-normal distribution parameters. 
+
+- 2025-11-09 (V 0.8.8)
+    - Changed the pkg name from `pympebm` to `pyjpm`. 
   
