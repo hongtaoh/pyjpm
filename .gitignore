@@ -20,5 +20,6 @@ __pycache__/
 .env 
 
 pympebm_old/
+pympebm_copy/
 deprecated/
-pyjpm/copies
+pyjpm/copies/
